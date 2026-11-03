@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { toast } from 'react-toastify';
 import api from '../../api/axios';
 
@@ -12,6 +12,13 @@ export default function Profile() {
   const [form, setForm] = useState({ experience: '', serviceArea: '', hourlyRate: '', city: '' });
   const [imageFile, setImageFile] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [ratingSummary, setRatingSummary] = useState({ rating: 0, reviewCount: 0, reviews: [] });
+
+  useEffect(() => {
+    api.get('/worker/reviews')
+      .then(({ data }) => setRatingSummary({ rating: data.rating || 0, reviewCount: data.reviews?.length || 0, reviews: data.reviews || [] }))
+      .catch((err) => toast.error(err.response?.data?.message || 'Could not load worker reviews'));
+  }, []);
 
   const toggleSkill = (s) => setSkills((prev) => prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]);
 
@@ -33,9 +40,17 @@ export default function Profile() {
   };
 
   return (
-    <div className="max-w-lg">
+    <div className="max-w-4xl space-y-6">
       <div className="card p-6">
-        <h2 className="font-semibold text-lg mb-6">Worker profile</h2>
+        <div className="mb-6 flex items-center justify-between">
+          <h2 className="font-semibold text-lg">Worker profile</h2>
+          <div className="text-right">
+            <p className="text-sm text-stone-500">Average rating</p>
+            <p className="text-xl font-semibold">{ratingSummary.reviewCount ? `${Number(ratingSummary.rating).toFixed(1)} / 5` : 'New Worker'}</p>
+            {ratingSummary.reviewCount ? <p className="text-xs text-stone-500">Based on {ratingSummary.reviewCount} review(s)</p> : <p className="text-xs text-stone-500">No reviews yet</p>}
+          </div>
+        </div>
+
         <form onSubmit={submit} className="space-y-4">
           <div>
             <label className="text-sm font-medium mb-1 block">Profile picture</label>
@@ -64,6 +79,25 @@ export default function Profile() {
             value={form.serviceArea} onChange={(e) => setForm({ ...form, serviceArea: e.target.value, city: e.target.value })} />
           <button type="submit" className="btn-primary" disabled={saving}>{saving ? 'Saving…' : 'Save changes'}</button>
         </form>
+      </div>
+
+      <div className="card p-6">
+        <h3 className="font-semibold text-lg mb-4">Customer reviews</h3>
+        {ratingSummary.reviews.length === 0 ? (
+          <p className="text-sm text-stone-500">No reviews yet. This worker is still waiting for their first customer rating.</p>
+        ) : (
+          <div className="space-y-3">
+            {ratingSummary.reviews.map((review) => (
+              <div key={review._id} className="rounded-lg border border-stone-200 p-3 dark:border-stone-700">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="font-medium">{review.customerId?.name || 'Customer'}</p>
+                  <span className="text-amber-500">{Array.from({ length: 5 }).map((_, idx) => (idx < review.rating ? '★' : '☆')).join('')}</span>
+                </div>
+                <p className="mt-1 text-sm text-stone-600 dark:text-stone-300">{review.review || 'No written comment provided.'}</p>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

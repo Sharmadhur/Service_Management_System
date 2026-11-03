@@ -7,10 +7,12 @@ const ctrl = require('../controllers/workerController');
 router.use(protect, authorize('worker'));
 
 router.get('/assignedJobs', ctrl.getAssignedJobs);
+router.get('/incomingRequests', ctrl.getIncomingRequests);
 router.put('/acceptJob/:id', ctrl.acceptJob);
 router.put('/rejectJob/:id', ctrl.rejectJob);
 router.put('/updateStatus/:id', ctrl.updateStatus);
 router.put('/availability', ctrl.setAvailability);
+router.put('/location', ctrl.updateLocation);
 router.put('/profile', upload.single('profileImage'), ctrl.updateWorkerProfile);
 router.get('/earnings', ctrl.getEarnings);
 router.get('/reviews', ctrl.getReviews);

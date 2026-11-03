@@ -1,19 +1,69 @@
+const crypto = require('crypto');
+const Razorpay = require('razorpay');
 const User = require('../models/User');
 const Worker = require('../models/Worker');
 const ServiceRequest = require('../models/ServiceRequest');
 const Review = require('../models/Review');
 const Payment = require('../models/Payment');
-const { findBestWorker } = require('../utils/assignWorker');
+const { findBestWorker, findNearbyWorkers } = require('../utils/assignWorker');
 
-// POST /api/customer/request - create a new service request & auto-assign
+const getRazorpayClient = () => {
+  if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) return null;
+  return new Razorpay({
+    key_id: process.env.RAZORPAY_KEY_ID,
+    key_secret: process.env.RAZORPAY_KEY_SECRET,
+  });
+};
+
+const recalculateWorkerRating = async (workerId) => {
+  if (!workerId) return null;
+  const worker = await Worker.findById(workerId);
+  if (!worker) return null;
+
+  const reviews = await Review.find({ workerId: worker._id });
+  const count = reviews.length;
+  worker.ratingCount = count;
+  worker.rating = count ? Number((reviews.reduce((sum, item) => sum + item.rating, 0) / count).toFixed(2)) : 0;
+  await worker.save();
+  return worker;
+};
+
+const markPaymentSuccessful = async (paymentDoc) => {
+  if (!paymentDoc) return null;
+  if (paymentDoc.paymentStatus === 'successful') {
+    return paymentDoc;
+  }
+
+  paymentDoc.paymentStatus = 'successful';
+  paymentDoc.paidAt = paymentDoc.paidAt || new Date();
+  await paymentDoc.save();
+
+  const request = await ServiceRequest.findById(paymentDoc.requestId);
+  if (request) {
+    request.paymentStatus = 'paid';
+    request.amount = paymentDoc.amount;
+    await request.save();
+  }
+
+  if (paymentDoc.workerId) {
+    const worker = await Worker.findById(paymentDoc.workerId);
+    if (worker) {
+      worker.earnings = Number(worker.earnings || 0) + Number(paymentDoc.amount || 0);
+      await worker.save();
+    }
+  }
+
+  return paymentDoc;
+};
+
 exports.createRequest = async (req, res, next) => {
   try {
-    const { category, description, address, city, lat, lng, preferredDate, preferredTime } = req.body;
+    const { category, description, address, city, lat, lng, preferredDate, preferredTime, workerId } = req.body;
     if (!category || !description || !address || !preferredDate || !preferredTime) {
       return res.status(400).json({ success: false, message: 'Missing required fields' });
     }
 
-    const request = await ServiceRequest.create({
+    const requestPayload = {
       customerId: req.user._id,
       category,
       description,
@@ -22,16 +72,79 @@ exports.createRequest = async (req, res, next) => {
       preferredDate,
       preferredTime,
       status: 'requested',
-    });
+      workerId: workerId || null,
+    };
 
-    const worker = await findBestWorker(request);
-    if (worker) {
-      request.workerId = worker._id;
-      request.status = 'assigned';
-      await request.save();
+    if (workerId) {
+      const selectedWorker = await Worker.findById(workerId).populate('userId', 'name email phone isBlocked');
+      if (!selectedWorker || selectedWorker.verified !== 'approved' || selectedWorker.availability !== 'available') {
+        return res.status(400).json({ success: false, message: 'Selected worker is not available right now.' });
+      }
+      if (!selectedWorker.skills.includes(category)) {
+        return res.status(400).json({ success: false, message: 'Selected worker does not offer this service.' });
+      }
+      const activeJob = await ServiceRequest.findOne({
+        workerId: selectedWorker._id,
+        status: { $nin: ['completed', 'cancelled', 'rejected'] },
+      });
+      if (activeJob) {
+        return res.status(409).json({ success: false, message: 'This worker is already assigned to an active job.' });
+      }
+      requestPayload.status = 'assigned';
     }
 
-    res.status(201).json({ success: true, request });
+    const request = await ServiceRequest.create(requestPayload);
+    res.status(201).json({ success: true, request, autoAssigned: !workerId });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.selectWorker = async (req, res, next) => {
+  try {
+    const { category, description, address, city, lat, lng, preferredDate, preferredTime, workerId } = req.body;
+    if (!category || !description || !address || !preferredDate || !preferredTime || !workerId) {
+      return res.status(400).json({ success: false, message: 'Missing required request details or worker selection' });
+    }
+
+    const selectedWorker = await Worker.findById(workerId).populate('userId', 'name isBlocked');
+    if (!selectedWorker) {
+      return res.status(404).json({ success: false, message: 'Worker not found' });
+    }
+    if (selectedWorker.verified !== 'approved' || selectedWorker.availability !== 'available') {
+      return res.status(400).json({ success: false, message: 'This worker is not available for new jobs.' });
+    }
+    if (!selectedWorker.skills.includes(category)) {
+      return res.status(400).json({ success: false, message: 'Selected worker is not skilled for this category.' });
+    }
+    if (selectedWorker.userId?.isBlocked) {
+      return res.status(400).json({ success: false, message: 'This worker is blocked and cannot be selected.' });
+    }
+
+    const activeJob = await ServiceRequest.findOne({
+      workerId: selectedWorker._id,
+      status: { $nin: ['completed', 'cancelled', 'rejected'] },
+    });
+    if (activeJob) {
+      return res.status(409).json({ success: false, message: 'This worker already has an active assignment.' });
+    }
+
+    const request = await ServiceRequest.create({
+      customerId: req.user._id,
+      workerId: selectedWorker._id,
+      category,
+      description,
+      address,
+      location: { city: city || '', lat: lat ?? null, lng: lng ?? null },
+      preferredDate,
+      preferredTime,
+      status: 'assigned',
+    });
+
+    selectedWorker.availability = 'busy';
+    await selectedWorker.save();
+
+    res.status(201).json({ success: true, request, selectedWorker });
   } catch (err) {
     next(err);
   }
@@ -59,39 +172,162 @@ exports.cancelRequest = async (req, res, next) => {
     }
     request.status = 'cancelled';
     await request.save();
+    if (request.workerId) {
+      const worker = await Worker.findById(request.workerId);
+      if (worker && worker.availability === 'busy') {
+        worker.availability = 'available';
+        await worker.save();
+      }
+    }
     res.json({ success: true, request });
   } catch (err) {
     next(err);
   }
 };
 
-// POST /api/customer/pay/:id - dummy payment
+exports.getMyPayments = async (req, res, next) => {
+  try {
+    const payments = await Payment.find({ customerId: req.user._id })
+      .populate('requestId', 'category status preferredDate amount')
+      .populate('workerId', 'skills rating location')
+      .sort('-createdAt');
+    res.json({ success: true, payments });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// POST /api/customer/pay/:id - generate Razorpay order
 exports.payForRequest = async (req, res, next) => {
   try {
-    const { amount, paymentMethod } = req.body;
     const request = await ServiceRequest.findOne({ _id: req.params.id, customerId: req.user._id });
     if (!request) return res.status(404).json({ success: false, message: 'Request not found' });
     if (request.status !== 'completed') {
       return res.status(400).json({ success: false, message: 'Request must be completed before payment' });
     }
 
-    const payment = await Payment.create({
-      requestId: request._id,
-      amount: amount || request.amount || 0,
-      paymentMethod: paymentMethod || 'card',
-      paymentStatus: 'paid',
-      transactionRef: `TXN-${Date.now()}`,
-    });
-
-    request.paymentStatus = 'paid';
-    request.amount = payment.amount;
-    await request.save();
-
-    if (request.workerId) {
-      await Worker.findByIdAndUpdate(request.workerId, { $inc: { earnings: payment.amount } });
+    const existing = await Payment.findOne({ requestId: request._id, paymentStatus: 'successful' });
+    if (existing) {
+      return res.json({ success: true, alreadyPaid: true, payment: existing, request });
     }
 
-    res.json({ success: true, payment, request });
+    const worker = request.workerId ? await Worker.findById(request.workerId) : null;
+    const baseAmount = Number(request.amount) > 0 ? Number(request.amount) : Number(worker?.hourlyRate || 500);
+    const amountInPaise = Math.round(baseAmount * 100);
+
+    const razorpay = getRazorpayClient();
+    if (!razorpay) {
+      return res.status(400).json({ success: false, message: 'Razorpay is not configured yet. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET.' });
+    }
+
+    const order = await razorpay.orders.create({
+      amount: amountInPaise,
+      currency: 'INR',
+      receipt: `laborlink_${request._id}`,
+      notes: {
+        requestId: String(request._id),
+        customerId: String(req.user._id),
+        workerId: request.workerId ? String(request.workerId) : '',
+      },
+    });
+
+    const payment = await Payment.findOneAndUpdate(
+      { requestId: request._id },
+      {
+        customerId: req.user._id,
+        workerId: request.workerId,
+        requestId: request._id,
+        amount: baseAmount,
+        paymentMethod: 'card',
+        paymentStatus: 'pending',
+        razorpayOrderId: order.id,
+        transactionRef: `TXN-${Date.now()}`,
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    );
+
+    res.json({ success: true, order, payment, request });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.verifyPayment = async (req, res, next) => {
+  try {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, requestId } = req.body;
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      return res.status(400).json({ success: false, message: 'Payment verification payload is incomplete.' });
+    }
+
+    const expectedSignature = crypto
+      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+      .digest('hex');
+
+    const payment = await Payment.findOne({
+      razorpayOrderId: razorpay_order_id,
+      requestId: requestId || { $exists: true },
+    });
+
+    if (!payment) {
+      return res.status(404).json({ success: false, message: 'Payment record not found' });
+    }
+
+    if (payment.paymentStatus === 'successful') {
+      return res.json({ success: true, payment, message: 'Payment already verified' });
+    }
+
+    if (expectedSignature !== razorpay_signature) {
+      payment.paymentStatus = 'failed';
+      payment.razorpayPaymentId = razorpay_payment_id;
+      await payment.save();
+      return res.status(400).json({ success: false, message: 'Payment verification failed: invalid signature.' });
+    }
+
+    payment.razorpayPaymentId = razorpay_payment_id;
+    payment.razorpaySignature = razorpay_signature;
+    payment.paidAt = new Date();
+    const completedPayment = await markPaymentSuccessful(payment);
+    res.json({ success: true, payment: completedPayment, message: 'Payment verified successfully' });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.handlePaymentWebhook = async (req, res, next) => {
+  try {
+    const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    const signature = req.headers['x-razorpay-signature'];
+    const rawBody = req.body?.toString ? req.body.toString() : '';
+
+    if (!secret || !signature || !rawBody) {
+      return res.status(400).json({ success: false, message: 'Webhook payload is invalid.' });
+    }
+
+    const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+    if (expected !== signature) {
+      return res.status(400).json({ success: false, message: 'Invalid Razorpay webhook signature.' });
+    }
+
+    const event = JSON.parse(rawBody);
+    const entity = event?.payload?.payment?.entity;
+    if (!entity) {
+      return res.status(400).json({ success: false, message: 'No payment entity in webhook payload.' });
+    }
+
+    const payment = await Payment.findOne({ razorpayOrderId: entity.order_id });
+    if (!payment) {
+      return res.status(404).json({ success: false, message: 'Payment not found for webhook.' });
+    }
+
+    if (payment.paymentStatus === 'successful') {
+      return res.json({ success: true, received: true, alreadyProcessed: true });
+    }
+
+    payment.razorpayPaymentId = entity.id;
+    payment.paidAt = new Date(entity.created_at * 1000);
+    await markPaymentSuccessful(payment);
+    res.json({ success: true, received: true });
   } catch (err) {
     next(err);
   }
@@ -118,14 +354,7 @@ exports.submitReview = async (req, res, next) => {
       review,
     });
 
-    const worker = await Worker.findById(request.workerId);
-    if (worker) {
-      const totalRating = worker.rating * worker.ratingCount + rating;
-      worker.ratingCount += 1;
-      worker.rating = Number((totalRating / worker.ratingCount).toFixed(2));
-      await worker.save();
-    }
-
+    await recalculateWorkerRating(request.workerId);
     res.status(201).json({ success: true, review: newReview });
   } catch (err) {
     next(err);
@@ -166,6 +395,28 @@ exports.searchWorkers = async (req, res, next) => {
   }
 };
 
+exports.searchNearbyWorkers = async (req, res, next) => {
+  try {
+    const { category, city, lat, lng, radius = 20, limit = 10 } = req.query;
+    if (!category) {
+      return res.status(400).json({ success: false, message: 'A service category is required.' });
+    }
+
+    const workers = await findNearbyWorkers({
+      category,
+      city: city || '',
+      lat: lat != null ? Number(lat) : null,
+      lng: lng != null ? Number(lng) : null,
+      radiusKm: Number(radius) || 20,
+      limit: Number(limit) || 10,
+    });
+
+    res.json({ success: true, workers, radius: Number(radius) || 20, total: workers.length });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // PUT /api/customer/favorite/:workerId - toggle favorite worker
 exports.toggleFavorite = async (req, res, next) => {
   try {
@@ -193,6 +444,71 @@ exports.updateProfile = async (req, res, next) => {
       { new: true, runValidators: true }
     );
     res.json({ success: true, user });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.getWorkerPublicProfile = async (req, res, next) => {
+  try {
+    const worker = await Worker.findById(req.params.workerId)
+      .populate('userId', 'name email phone')
+      .lean();
+    if (!worker) return res.status(404).json({ success: false, message: 'Worker not found' });
+
+    const reviews = await Review.find({ workerId: worker._id })
+      .populate('customerId', 'name')
+      .sort('-createdAt')
+      .lean();
+
+    const merged = {
+      ...worker,
+      rating: Number(worker.rating || 0),
+      ratingCount: Number(worker.ratingCount || reviews.length),
+      reviewCount: reviews.length,
+      reviews,
+    };
+
+    res.json({ success: true, worker: merged });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.getWorkerReviews = async (req, res, next) => {
+  try {
+    const worker = await Worker.findById(req.params.workerId);
+    if (!worker) return res.status(404).json({ success: false, message: 'Worker not found' });
+
+    const reviews = await Review.find({ workerId: worker._id })
+      .populate('customerId', 'name')
+      .sort('-createdAt');
+
+    res.json({ success: true, rating: worker.rating, reviewCount: worker.ratingCount, reviews });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.getMyWorkerProfile = async (req, res, next) => {
+  try {
+    const worker = await Worker.findOne({ userId: req.user._id });
+    if (!worker) return res.status(404).json({ success: false, message: 'Worker profile not found' });
+
+    const reviews = await Review.find({ workerId: worker._id }).populate('customerId', 'name').sort('-createdAt');
+    res.json({ success: true, worker, reviews });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.findBestWorkerForRequest = async (req, res, next) => {
+  try {
+    const { requestId } = req.params;
+    const request = await ServiceRequest.findById(requestId);
+    if (!request) return res.status(404).json({ success: false, message: 'Request not found' });
+    const worker = await findBestWorker(request);
+    res.json({ success: true, worker });
   } catch (err) {
     next(err);
   }

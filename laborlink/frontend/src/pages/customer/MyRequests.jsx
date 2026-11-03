@@ -18,7 +18,7 @@ export default function MyRequests() {
   useEffect(() => { load(); }, []);
 
   const cancel = async (id) => {
-    if (!confirm('Cancel this request?')) return;
+    if (!window.confirm('Cancel this request?')) return;
     try {
       await api.put(`/customer/cancelRequest/${id}`);
       toast.success('Request cancelled');
@@ -28,11 +28,55 @@ export default function MyRequests() {
     }
   };
 
-  const pay = async (id) => {
+  const pay = async (request) => {
     try {
-      await api.post(`/customer/pay/${id}`, { paymentMethod: 'card' });
-      toast.success('Payment successful');
-      load();
+      const publicKey = import.meta.env.VITE_RAZORPAY_KEY_ID;
+      if (!publicKey) {
+        toast.error('Razorpay public key is not configured. Add VITE_RAZORPAY_KEY_ID to your frontend .env file.');
+        return;
+      }
+
+      const { data } = await api.post(`/customer/pay/${request._id}`);
+      if (data.alreadyPaid) {
+        toast.success('This request has already been paid.');
+        load();
+        return;
+      }
+
+      const script = document.createElement('script');
+      script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+      script.async = true;
+      script.onload = () => {
+        const checkout = new window.Razorpay({
+          key: publicKey,
+          amount: data.order.amount,
+          currency: data.order.currency,
+          order_id: data.order.id,
+          name: 'LaborLink',
+          description: `Payment for ${request.category}`,
+          handler: async function (response) {
+            try {
+              await api.post('/customer/verifyPayment', {
+                requestId: request._id,
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+              });
+              toast.success('Payment successful — your worker was credited.');
+              load();
+            } catch (verifyErr) {
+              toast.error(verifyErr.response?.data?.message || 'Payment was created but verification failed.');
+            }
+          },
+          prefill: {
+            name: localStorage.getItem('laborlink_user') ? JSON.parse(localStorage.getItem('laborlink_user')).name : '',
+          },
+          theme: { color: '#2563eb' },
+        });
+        checkout.open();
+      };
+      script.onerror = () => toast.error('Razorpay checkout could not be loaded.');
+      document.body.appendChild(script);
     } catch (err) {
       toast.error(err.response?.data?.message || 'Payment failed');
     }
@@ -78,7 +122,7 @@ export default function MyRequests() {
                 </div>
                 <div className="flex flex-col items-end gap-2">
                   <StatusBadge status={r.status} />
-                  <StatusBadge status={r.paymentStatus} />
+                  <StatusBadge status={r.paymentStatus === 'paid' ? 'paid' : r.paymentStatus || 'pending'} />
                 </div>
               </div>
               <div className="mt-4 flex flex-wrap gap-2">
@@ -86,7 +130,7 @@ export default function MyRequests() {
                   <button className="btn-secondary text-xs" onClick={() => cancel(r._id)}>Cancel</button>
                 )}
                 {r.status === 'completed' && r.paymentStatus !== 'paid' && (
-                  <button className="btn-primary text-xs" onClick={() => pay(r._id)}>Pay now</button>
+                  <button className="btn-primary text-xs" onClick={() => pay(r)}>Pay now</button>
                 )}
                 {r.status === 'completed' && r.paymentStatus === 'paid' && (
                   <button className="btn-secondary text-xs" onClick={() => setReviewModal(r._id)}>Rate & review</button>
@@ -103,11 +147,10 @@ export default function MyRequests() {
             <h3 className="font-semibold mb-4">Rate this worker</h3>
             <div className="flex gap-1 mb-4">
               {[1, 2, 3, 4, 5].map((n) => (
-                <button key={n} onClick={() => setRating(n)} className={`text-2xl ${n <= rating ? 'text-accent-500' : 'text-stone-300'}`}>★</button>
+                <button key={n} type="button" onClick={() => setRating(n)} className={`text-2xl ${n <= rating ? 'text-amber-500' : 'text-stone-300'}`}>★</button>
               ))}
             </div>
-            <textarea className="input-field mb-4" rows={3} placeholder="Leave a review (optional)"
-              value={reviewText} onChange={(e) => setReviewText(e.target.value)} />
+            <textarea className="input-field mb-4" rows={3} placeholder="Leave a review (optional)" value={reviewText} onChange={(e) => setReviewText(e.target.value)} />
             <div className="flex gap-2">
               <button className="btn-secondary flex-1" onClick={() => setReviewModal(null)}>Cancel</button>
               <button className="btn-primary flex-1" onClick={submitReview}>Submit</button>

@@ -24,4 +24,7 @@ const workerSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+workerSchema.index({ availability: 1, verified: 1, 'location.city': 1 });
+workerSchema.index({ skills: 1, verified: 1, availability: 1 });
+
 module.exports = mongoose.model('Worker', workerSchema);

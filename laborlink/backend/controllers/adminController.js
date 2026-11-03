@@ -181,8 +181,21 @@ exports.getReviews = async (req, res, next) => {
 // DELETE /api/admin/reviews/:id
 exports.deleteReview = async (req, res, next) => {
   try {
-    const review = await Review.findByIdAndDelete(req.params.id);
+    const review = await Review.findById(req.params.id);
     if (!review) return res.status(404).json({ success: false, message: 'Review not found' });
+
+    await Review.findByIdAndDelete(req.params.id);
+    await (async () => {
+      const worker = await Worker.findById(review.workerId);
+      if (worker) {
+        const reviews = await Review.find({ workerId: worker._id });
+        const count = reviews.length;
+        worker.ratingCount = count;
+        worker.rating = count ? Number((reviews.reduce((sum, item) => sum + item.rating, 0) / count).toFixed(2)) : 0;
+        await worker.save();
+      }
+    })();
+
     res.json({ success: true, message: 'Review deleted' });
   } catch (err) {
     next(err);

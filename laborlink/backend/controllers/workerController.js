@@ -39,26 +39,23 @@ exports.acceptJob = async (req, res, next) => {
   }
 };
 
-// PUT /api/worker/rejectJob/:id - reassigns to next available worker
+// PUT /api/worker/rejectJob/:id - worker declines a customer-selected assignment
 exports.rejectJob = async (req, res, next) => {
   try {
     const worker = await getWorkerProfile(req.user._id);
     const job = await ServiceRequest.findOne({ _id: req.params.id, workerId: worker._id });
     if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
 
+    if (!job.rejectedWorkers) job.rejectedWorkers = [];
     job.rejectedWorkers.push(worker._id);
     job.workerId = null;
     job.status = 'requested';
     await job.save();
 
-    const nextWorker = await findBestWorker(job);
-    if (nextWorker) {
-      job.workerId = nextWorker._id;
-      job.status = 'assigned';
-      await job.save();
-    }
+    worker.availability = 'available';
+    await worker.save();
 
-    res.json({ success: true, job });
+    res.json({ success: true, job, requiresCustomerSelection: true });
   } catch (err) {
     next(err);
   }
@@ -99,12 +96,53 @@ exports.setAvailability = async (req, res, next) => {
     if (!['available', 'busy'].includes(availability)) {
       return res.status(400).json({ success: false, message: 'Invalid availability value' });
     }
-    const worker = await Worker.findOneAndUpdate(
-      { userId: req.user._id },
-      { availability },
-      { new: true }
-    );
+    const worker = await Worker.findOne({ userId: req.user._id });
+    if (!worker) return res.status(404).json({ success: false, message: 'Worker profile not found' });
+
+    const activeJob = await ServiceRequest.findOne({
+      workerId: worker._id,
+      status: { $nin: ['completed', 'cancelled', 'rejected'] },
+    });
+    if (activeJob && availability === 'available') {
+      return res.status(400).json({ success: false, message: 'You cannot set yourself available while a job is still active.' });
+    }
+
+    worker.availability = availability;
+    await worker.save();
     res.json({ success: true, worker });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.updateLocation = async (req, res, next) => {
+  try {
+    const { city, lat, lng, address } = req.body;
+    const worker = await Worker.findOne({ userId: req.user._id });
+    if (!worker) return res.status(404).json({ success: false, message: 'Worker profile not found' });
+
+    if (city) worker.location.city = city;
+    if (address) worker.location.address = address;
+    if (lat !== undefined) worker.location.lat = lat;
+    if (lng !== undefined) worker.location.lng = lng;
+    await worker.save();
+
+    res.json({ success: true, worker });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.getIncomingRequests = async (req, res, next) => {
+  try {
+    const worker = await getWorkerProfile(req.user._id);
+    if (!worker) return res.status(404).json({ success: false, message: 'Worker profile not found' });
+
+    const requests = await ServiceRequest.find({ workerId: worker._id, status: { $in: ['assigned', 'accepted', 'on_the_way', 'in_progress'] } })
+      .populate('customerId', 'name phone email address')
+      .sort('-createdAt');
+
+    res.json({ success: true, requests });
   } catch (err) {
     next(err);
   }

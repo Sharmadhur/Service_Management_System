@@ -20,6 +20,8 @@ const io = new Server(server, {
   cors: { origin: process.env.CLIENT_URL || '*', methods: ['GET', 'POST'] },
 });
 
+app.use('/api/customer/payment/webhook', express.raw({ type: 'application/json' }));
+
 // Make io accessible in controllers via req.app.get('io') if needed for live status updates
 app.set('io', io);
 

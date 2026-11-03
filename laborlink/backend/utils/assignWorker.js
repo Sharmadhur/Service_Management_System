@@ -14,6 +14,16 @@ function distanceKm(lat1, lng1, lat2, lng2) {
   return R * c;
 }
 
+function workerIsEligible(worker, category, rejectedWorkers = []) {
+  if (!worker || !worker.userId) return false;
+  if (worker.verified !== 'approved') return false;
+  if (worker.availability !== 'available') return false;
+  if (!worker.skills || !worker.skills.includes(category)) return false;
+  if (rejectedWorkers.some((id) => id.toString() === worker._id.toString())) return false;
+  if (worker.userId.isBlocked) return false;
+  return true;
+}
+
 /**
  * Finds the best available worker for a service request.
  * Matching order: skill match -> approved & available -> not already rejected -> nearest by location/city.
@@ -28,10 +38,9 @@ async function findBestWorker(request) {
     _id: { $nin: request.rejectedWorkers || [] },
   }).populate('userId', 'name email phone isBlocked');
 
-  const eligible = candidates.filter((w) => w.userId && !w.userId.isBlocked);
+  const eligible = candidates.filter((w) => workerIsEligible(w, request.category, request.rejectedWorkers || []));
   if (eligible.length === 0) return null;
 
-  // Prefer same city, then nearest by coordinates, then highest rating
   const reqLat = request.location?.lat;
   const reqLng = request.location?.lng;
   const reqCity = (request.location?.city || '').toLowerCase();
@@ -53,4 +62,53 @@ async function findBestWorker(request) {
   return eligible[0];
 }
 
-module.exports = { findBestWorker, distanceKm };
+async function findNearbyWorkers({ category, city, lat, lng, radiusKm = 20, limit = 20 }) {
+  const query = {
+    skills: { $in: [category] },
+    verified: 'approved',
+    availability: 'available',
+  };
+
+  const workers = await Worker.find(query)
+    .populate('userId', 'name email phone isBlocked');
+
+  const normalizedCity = (city || '').trim().toLowerCase();
+  const result = workers
+    .filter((worker) => worker.userId && !worker.userId.isBlocked)
+    .map((worker) => {
+      const workerCity = (worker.location?.city || '').trim().toLowerCase();
+      const hasCoordinates = Number.isFinite(worker.location?.lat) && Number.isFinite(worker.location?.lng);
+      const hasCustomerCoordinates = Number.isFinite(lat) && Number.isFinite(lng);
+      const distance = hasCustomerCoordinates && hasCoordinates
+        ? distanceKm(lat, lng, worker.location.lat, worker.location.lng)
+        : Infinity;
+
+      const cityMatch = normalizedCity && workerCity && workerCity === normalizedCity;
+      const withinRadius = hasCustomerCoordinates && hasCoordinates ? distance <= radiusKm : false;
+
+      return { worker, cityMatch, distance, withinRadius };
+    })
+    .filter(({ worker, cityMatch, withinRadius }) => {
+      if (Number.isFinite(lat) && Number.isFinite(lng)) {
+        return (worker.location?.lat !== null && worker.location?.lng !== null) ? withinRadius : cityMatch;
+      }
+      return cityMatch || (worker.location?.city || '').trim().length > 0;
+    })
+    .sort((a, b) => {
+      if (a.withinRadius !== b.withinRadius) return Number(b.withinRadius) - Number(a.withinRadius);
+      if (a.distance !== b.distance) return a.distance - b.distance;
+      if (a.cityMatch !== b.cityMatch) return Number(b.cityMatch) - Number(a.cityMatch);
+      return (b.worker.rating || 0) - (a.worker.rating || 0);
+    })
+    .slice(0, Number(limit) || 20)
+    .map(({ worker, distance, cityMatch, withinRadius }) => ({
+      ...worker.toObject(),
+      distanceKm: Number.isFinite(distance) ? Number(distance.toFixed(1)) : null,
+      cityMatch,
+      withinRadius,
+    }));
+
+  return result;
+}
+
+module.exports = { findBestWorker, findNearbyWorkers, distanceKm, workerIsEligible };

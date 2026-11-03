@@ -1,145 +1,213 @@
 # LaborLink — On-Demand Labor Service Management System
 
-A full-stack MERN application connecting customers with skilled/unskilled workers
-across 12 service trades. Customers request a worker; the system automatically
-matches the nearest available, skill-matched worker (or an admin can assign one
-manually); the job moves through a full status lifecycle to payment and review.
+LaborLink is a full-stack MERN app that connects customers with verified workers across multiple service trades. The application supports request management, nearby worker matching, job lifecycle tracking, payments, worker reviews, and role-based admin management.
 
 ## Tech stack
 
-- **Frontend:** React 18 (Vite), React Router, Axios, Tailwind CSS, React Toastify, Recharts
-- **Backend:** Node.js, Express.js
-- **Database:** MongoDB + Mongoose
-- **Auth:** JWT + bcrypt, role-based access control (customer / worker / admin)
-- **Uploads:** Multer (local disk storage, served from `/uploads`)
-- **Real-time:** Socket.io scaffolding is wired up server-side for live status pushes
-
-## Folder structure
-
-```
-laborlink/
-  backend/
-    server.js
-    config/db.js
-    controllers/        # auth, customer, worker, admin
-    middlewares/         # auth (JWT + RBAC), errorHandler, upload
-    models/              # User, Worker, ServiceRequest, Review, Payment, Category
-    routes/
-    utils/assignWorker.js  # skill + location matching logic
-    seed/seed.js
-  frontend/
-    src/
-      api/axios.js
-      context/AuthContext.jsx
-      components/         # Navbar, DashboardLayout, StatusBadge, ProtectedRoute
-      pages/
-        public/            # Home, About, Services, Contact, Login, Register
-        customer/
-        worker/
-        admin/
-```
+- Frontend: React 18 + Vite + React Router + Tailwind CSS + React Toastify
+- Backend: Node.js + Express.js
+- Database: MongoDB + Mongoose
+- Auth: JWT + bcrypt
+- Payments: Razorpay test mode integration
+- Uploads: Multer with local storage under `/uploads`
+- Real-time: Socket.io scaffold for live updates
 
 ## Setup
 
 ### 1. Prerequisites
+
 - Node.js 18+
-- A running MongoDB instance (local, or a connection string from MongoDB Atlas)
+- MongoDB running locally or on MongoDB Atlas
 
-### 2. Backend
-
-```bash
-cd backend
-npm install
-cp .env.example .env   # edit MONGO_URI / JWT_SECRET if needed
-npm run seed            # optional: creates demo admin/customer/worker accounts
-npm run dev              # starts on http://localhost:5000
-```
-
-Demo accounts created by the seed script:
-
-| Role     | Email                    | Password     |
-|----------|---------------------------|--------------|
-| Admin    | admin@laborlink.com       | admin123     |
-| Customer | customer@laborlink.com    | password123  |
-| Worker   | worker1@laborlink.com     | password123  |
-
-### 3. Frontend
+### 2. Backend configuration
 
 ```bash
-cd frontend
+cd laborlink/backend
 npm install
-npm run dev              # starts on http://localhost:5173
+cp .env.example .env
 ```
 
-The Vite dev server proxies `/api` and `/uploads` to `http://localhost:5000`,
-so no `.env` is needed on the frontend for local development.
+Then update the values in `.env`:
 
-## How worker assignment works
+- `MONGO_URI` — your MongoDB connection string
+- `JWT_SECRET` — a secure random string
+- `CLIENT_URL` — frontend origin, such as `http://localhost:5173`
+- `RAZORPAY_KEY_ID` — your Razorpay test key
+- `RAZORPAY_KEY_SECRET` — your Razorpay test secret
+- `RAZORPAY_WEBHOOK_SECRET` — your Razorpay webhook secret
 
-1. A customer submits a request with category, address/city, and preferred date/time.
-2. `utils/assignWorker.js` looks for **approved, available** workers whose `skills`
-   include the requested category, excluding any worker who already rejected this job.
-3. Candidates are ranked by: same city first, then nearest by lat/lng (haversine
-   distance) if coordinates are set, then highest rating.
-4. The top candidate is auto-assigned (`status: assigned`). If none are available,
-   the request stays `requested` until an admin assigns one manually, or a worker
-   becomes available (a fresh request can be resubmitted, or an admin can assign).
-5. If the assigned worker rejects, the job is automatically reassigned to the next
-   best candidate.
+Run the app:
 
-## Job status lifecycle
-
+```bash
+npm run seed
+npm run dev
 ```
-requested → assigned → accepted → on_the_way → in_progress → completed → (paid) → (reviewed)
+
+Demo accounts:
+
+- Admin: `admin@laborlink.com` / `admin123`
+- Customer: `customer@laborlink.com` / `password123`
+- Worker: `worker1@laborlink.com` / `password123`
+
+### 3. Frontend configuration
+
+```bash
+cd laborlink/frontend
+npm install
+cp .env.example .env
 ```
-A request can also move to `cancelled` (by the customer, before completion) or
-`rejected`-then-reassigned (by a worker declining an assigned job).
 
-## Key API routes
+Add your public Razorpay key:
 
-| Method | Route                                  | Access   |
-|--------|------------------------------------------|----------|
-| POST   | /api/auth/register                        | Public   |
-| POST   | /api/auth/login                           | Public   |
-| GET    | /api/auth/me                              | Any      |
-| POST   | /api/customer/request                     | Customer |
-| GET    | /api/customer/myRequests                  | Customer |
-| PUT    | /api/customer/cancelRequest/:id           | Customer |
-| POST   | /api/customer/pay/:id                     | Customer |
-| POST   | /api/customer/review                       | Customer |
-| GET    | /api/customer/searchWorkers                | Customer |
-| GET    | /api/worker/assignedJobs                   | Worker   |
-| PUT    | /api/worker/acceptJob/:id                  | Worker   |
-| PUT    | /api/worker/rejectJob/:id                  | Worker   |
-| PUT    | /api/worker/updateStatus/:id               | Worker   |
-| PUT    | /api/worker/availability                    | Worker   |
-| GET    | /api/admin/users                            | Admin    |
-| GET    | /api/admin/workers                          | Admin    |
-| PUT    | /api/admin/approveWorker/:id                | Admin    |
-| GET    | /api/admin/requests                          | Admin    |
-| PUT    | /api/admin/assignWorker/:id                  | Admin    |
-| GET    | /api/admin/analytics                         | Admin    |
+```env
+VITE_RAZORPAY_KEY_ID=rzp_test_...
+```
 
-See `backend/routes/` for the full list, including categories CRUD and review
-moderation.
+Then run:
 
-## Notes / what's simplified for this build
+```bash
+npm run dev
+```
 
-- **Payments** are dummy — `POST /api/customer/pay/:id` immediately marks a
-  completed job as paid and credits the worker's earnings, with no real payment
-  gateway integration.
-- **Email notifications** and **PDF invoice download** are not implemented;
-  Socket.io is wired up server-side as the foundation for live status pushes,
-  but the frontend does not yet subscribe to socket events.
-- **Cloudinary** is not integrated — profile images are stored on local disk
-  under `backend/uploads/` and served statically.
-- Extend `utils/assignWorker.js` if you want geocoding (address → lat/lng) for
-  true distance-based matching; currently lat/lng must be supplied directly.
+The Vite app proxies API requests to the backend at `http://localhost:5000`.
 
-## Production notes
+## Updated functionality
 
-- Set a strong, random `JWT_SECRET` in `backend/.env` before deploying.
-- Point `MONGO_URI` at your production database and `CLIENT_URL` at your deployed
-  frontend origin (used for CORS).
-- Build the frontend with `npm run build` inside `frontend/` and serve the
-  `dist/` folder from your static host or CDN of choice.
+### 1) Real Razorpay payment integration
+
+The app now creates Razorpay orders on the backend and verifies the payment signature before marking a request as paid. Payment records are stored in MongoDB and worker earnings are credited only once per verified payment.
+
+Important behavior:
+
+- The amount is calculated on the server using the request and worker data.
+- The frontend never receives or stores the Razorpay secret key.
+- Duplicate payments are blocked using request-level idempotency.
+- Webhook validation is supported for reliable confirmation.
+
+### 2) Customer-selected nearby workers
+
+Customers can now:
+
+- detect their current location using the browser geolocation API
+- enter city/address manually if permission is denied
+- search nearby approved and available workers within a configurable radius
+- compare workers by distance, rating, reviews, and skills
+- confirm a worker selection before creating the service request
+
+The selected worker is assigned only after customer confirmation, and if the worker rejects the request, the customer returns to the selection flow rather than having another worker auto-assigned without consent.
+
+### 3) Worker rating and review system
+
+Customers can:
+
+- submit a 1–5 star review after job completion
+- leave an optional comment
+- submit only one review per completed request
+
+Worker ratings are recalculated automatically from all reviews and stored back on the worker profile.
+
+## Payment configuration and testing
+
+### Razorpay test mode
+
+1. Sign in to the Razorpay Dashboard.
+2. Open Test Mode.
+3. Copy your test key ID and secret.
+4. Set them in `backend/.env` as:
+
+```env
+RAZORPAY_KEY_ID=rzp_test_...
+RAZORPAY_KEY_SECRET=your_test_secret
+```
+
+5. Set the public key in `frontend/.env`:
+
+```env
+VITE_RAZORPAY_KEY_ID=rzp_test_...
+```
+
+6. Create a webhook in the Razorpay dashboard and set `RAZORPAY_WEBHOOK_SECRET` in the backend.
+
+### Payment testing workflow
+
+1. Complete a job and ensure it is in `completed` status.
+2. Click Pay Now from the customer dashboard.
+3. A Razorpay checkout modal opens.
+4. Use Razorpay test payment credentials to complete a successful payment.
+5. The backend verifies the signature.
+6. The request payment status becomes `paid` and worker earnings are credited.
+7. Test a failed payment and confirm the payment record is marked `failed`.
+8. Repeat the same payment flow to confirm duplicate protection.
+
+## Updated API routes
+
+### Customer
+
+- `POST /api/customer/request`
+- `POST /api/customer/selectWorker`
+- `GET /api/customer/searchNearbyWorkers`
+- `GET /api/customer/searchWorkers`
+- `GET /api/customer/myRequests`
+- `GET /api/customer/myPayments`
+- `POST /api/customer/pay/:id`
+- `POST /api/customer/verifyPayment`
+- `POST /api/customer/payment/webhook`
+- `POST /api/customer/review`
+- `GET /api/customer/myReviews`
+- `GET /api/customer/worker/:workerId`
+
+### Worker
+
+- `GET /api/worker/assignedJobs`
+- `GET /api/worker/incomingRequests`
+- `PUT /api/worker/acceptJob/:id`
+- `PUT /api/worker/rejectJob/:id`
+- `PUT /api/worker/updateStatus/:id`
+- `PUT /api/worker/availability`
+- `PUT /api/worker/location`
+- `PUT /api/worker/profile`
+- `GET /api/worker/earnings`
+- `GET /api/worker/reviews`
+
+### Admin
+
+- `GET /api/admin/workers`
+- `PUT /api/admin/approveWorker/:id`
+- `GET /api/admin/requests`
+- `PUT /api/admin/assignWorker/:id`
+- `GET /api/admin/reviews`
+- `DELETE /api/admin/reviews/:id`
+- `GET /api/admin/analytics`
+
+## Worker selection workflow
+
+1. Customer chooses a service category and enters the address or location.
+2. The app fetches nearby approved and available workers.
+3. Workers are ranked by proximity, then rating.
+4. Customer compares candidates and selects one.
+5. A confirmation modal verifies the details.
+6. A service request is created and assigned to the selected worker only after confirmation.
+7. The worker can accept or reject the job.
+8. If rejected, the customer must choose another worker.
+
+## Rating workflow
+
+1. After job completion, the customer can open Rate & Review.
+2. The customer enters a 1–5 star score and optional comment.
+3. The review is saved once per request.
+4. The worker's average rating and total review count are recalculated automatically.
+5. These values appear on worker cards and profile summaries.
+
+## Verification
+
+This project was validated with:
+
+```bash
+cd laborlink/backend
+node --check server.js && node --check controllers/customerController.js && node --check controllers/workerController.js && node --check utils/assignWorker.js
+
+cd ../frontend
+npm run build
+```
+
+The frontend production build completed successfully with Vite. A live MongoDB-backed runtime test requires a running database and valid payment credentials.
